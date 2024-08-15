@@ -14,20 +14,18 @@ import struct
 
 
 class DataCollector:
-    def __init__(self, image_topic, pointcloud_topic, odometry_topic, save_dir, interval=1.0, time_tolerance=0.1):
+    def __init__(self, image_topic, pointcloud_topic, odometry_topic, save_dir, time_tolerance=0.1):
         self.current_frame = 0
         self.save_dir = save_dir
-        self.interval = interval
         self.time_tolerance = time_tolerance
-        self.last_received_time = rospy.Time.now()
         self.odometry_position = None
         self.odometry_orientation = None
+        self.pointcloud_frames = []
 
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
 
         self.image_queue = deque()
-        self.pointcloud_queue = deque()
         self.odometry_queue = deque()
 
         image_sub = message_filters.Subscriber(image_topic, Image)
@@ -37,15 +35,15 @@ class DataCollector:
         self.ts = message_filters.ApproximateTimeSynchronizer([image_sub, pointcloud_sub], 10, time_tolerance)
         self.ts.registerCallback(self.queue_data)
 
-        self.timer = rospy.Timer(rospy.Duration(self.interval), self.process_and_save)
-
     def odometry_callback(self, odometry_data):
         self.odometry_queue.append(odometry_data)
 
     def queue_data(self, image_data, pointcloud_data):
-        self.last_received_time = rospy.Time.now()
         self.image_queue.append(image_data)
-        self.pointcloud_queue.append(pointcloud_data)
+        self.pointcloud_frames.append(pointcloud_data)
+
+        if len(self.pointcloud_frames) == 10:
+            self.process_and_save()
 
     def find_closest_odometry(self, timestamp):
         if not self.odometry_queue:
@@ -54,41 +52,44 @@ class DataCollector:
         closest_odometry = min(self.odometry_queue, key=lambda odom: abs(odom.header.stamp - timestamp))
         return closest_odometry
 
-    def process_and_save(self, event):
-        current_time = rospy.Time.now()
-        time_diff = (current_time - self.last_received_time).to_sec()
+    def find_closest_image(self, timestamp):
+        if not self.image_queue:
+            return None
 
-        if time_diff > 2.0:
-            rospy.logwarn("No new data for 2 seconds, clearing queues.")
-            self.image_queue.clear()
-            self.pointcloud_queue.clear()
-            self.odometry_queue.clear()
-            return
+        closest_image = min(self.image_queue, key=lambda img: abs(img.header.stamp - timestamp))
+        return closest_image
 
-        if not self.image_queue or not self.pointcloud_queue:
-            rospy.logwarn("No data in queue to process.")
-            return
+    def transform_point(self, point, transform_matrix):
+        homogenous_point = np.array([point[0], point[1], point[2], 1.0])
+        transformed_point = np.dot(transform_matrix, homogenous_point)
+        return transformed_point[:3], point[3]
 
-        closest_image = min(self.image_queue, key=lambda img: abs(img.header.stamp - current_time))
-        closest_pointcloud = min(self.pointcloud_queue, key=lambda pcl: abs(pcl.header.stamp - current_time))
-        closest_odometry = self.find_closest_odometry(closest_image.header.stamp)
+    def process_and_save(self):
+        final_pointcloud = []
+        last_pointcloud = self.pointcloud_frames[-1]
+        timestamp = last_pointcloud.header.stamp
 
-        if closest_odometry and abs(
-                closest_image.header.stamp - closest_odometry.header.stamp).to_sec() <= self.time_tolerance:
-            rospy.loginfo("Matched /Odometry data at time: {}".format(closest_odometry.header.stamp.to_sec()))
-            self.process_frame(closest_image, closest_pointcloud, closest_odometry)
-        else:
-            self.process_frame(closest_image, closest_pointcloud, closest_odometry)
+        for pcl in self.pointcloud_frames:
+            closest_odometry = self.find_closest_odometry(pcl.header.stamp)
+            if closest_odometry:
+                transform_matrix = self.get_transform_matrix(closest_odometry)
+                for point in pc2.read_points(pcl, field_names=("x", "y", "z", "intensity"), skip_nans=True):
+                    transformed_point, intensity = self.transform_point(point, transform_matrix)
+                    final_pointcloud.append(
+                        (transformed_point[0], transformed_point[1], transformed_point[2], intensity))
 
-        self.image_queue = deque(filter(lambda img: img.header.stamp >= closest_image.header.stamp, self.image_queue))
-        self.pointcloud_queue = deque(
-            filter(lambda pcl: pcl.header.stamp >= closest_pointcloud.header.stamp, self.pointcloud_queue))
-        self.odometry_queue = deque(filter(lambda odom: odom.header.stamp >= closest_odometry.header.stamp,
-                                           self.odometry_queue)) if closest_odometry else self.odometry_queue
+        closest_image = self.find_closest_image(timestamp)
+        closest_odometry = self.find_closest_odometry(timestamp)
 
-    def process_frame(self, image_data, pointcloud_data, odometry_data):
+        self.process_frame(closest_image, final_pointcloud, closest_odometry)
+
+        self.pointcloud_frames = []
+        self.image_queue = deque(filter(lambda img: img.header.stamp >= timestamp, self.image_queue))
+        self.odometry_queue = deque(filter(lambda odom: odom.header.stamp >= timestamp, self.odometry_queue))
+
+    def process_frame(self, image_data, fused_pointcloud, odometry_data):
         self.process_image(image_data)
-        self.process_pointcloud(pointcloud_data)
+        self.process_pointcloud(fused_pointcloud)
         if odometry_data:
             self.process_odometry(odometry_data)
         else:
@@ -108,13 +109,12 @@ class DataCollector:
         except Exception as e:
             rospy.logerr("Failed to process image: {}".format(e))
 
-    def process_pointcloud(self, data):
-        points = list(pc2.read_points(data, field_names=("x", "y", "z", "intensity"), skip_nans=True))
+    def process_pointcloud(self, points):
         self.pointcloud_3d_data = self.convert_points_to_binary(points)
         points_2d = self.convert_to_2d(points)
         points_2d_sampled = self.sample_points(points_2d)
         self.pointcloud_2d_data = self.convert_points_to_binary(points_2d_sampled)
-        self.generate_json(data, points, points_2d_sampled)
+        self.generate_json(points, points_2d_sampled)
 
     def process_odometry(self, data):
         self.odometry_position = [data.pose.pose.position.x,
@@ -124,6 +124,25 @@ class DataCollector:
                                      data.pose.pose.orientation.y,
                                      data.pose.pose.orientation.z,
                                      data.pose.pose.orientation.w]
+
+    def get_transform_matrix(self, odometry_data):
+        position = [odometry_data.pose.pose.position.x, odometry_data.pose.pose.position.y,
+                    odometry_data.pose.pose.position.z]
+        orientation = [odometry_data.pose.pose.orientation.x, odometry_data.pose.pose.orientation.y,
+                       odometry_data.pose.pose.orientation.z, odometry_data.pose.pose.orientation.w]
+        rotation_matrix = self.quaternion_to_rotation_matrix(orientation)
+        transform_matrix = np.eye(4)
+        transform_matrix[:3, :3] = rotation_matrix
+        transform_matrix[:3, 3] = position
+        return transform_matrix
+
+    def quaternion_to_rotation_matrix(self, quaternion):
+        x, y, z, w = quaternion
+        return np.array([
+            [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+            [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+            [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)]
+        ])
 
     def convert_points_to_binary(self, points):
         binary_data = bytearray()
@@ -152,8 +171,8 @@ class DataCollector:
         _, _, z, w = quat
         return math.atan2(2.0 * (w * z), 1.0 - 2.0 * (z * z))
 
-    def generate_json(self, data, points_3d, points_2d):
-        timestamp = data.header.stamp.secs + data.header.stamp.nsecs / 1e9
+    def generate_json(self, points_3d, points_2d):
+        timestamp = rospy.Time.now().to_sec()
         if self.odometry_position and self.odometry_orientation:
             yaw = self.quaternion_to_yaw(self.odometry_orientation)
             pos_yaw = self.odometry_position + [round(yaw, 6)]
@@ -175,6 +194,7 @@ class DataCollector:
         if self.odometry_position:
             return self.odometry_position if random.random() < 0.1 else None
         return None
+
     def save_bin_file(self):
         if self.image_data and self.pointcloud_3d_data and self.pointcloud_2d_data and self.json_data:
             bin_filename = os.path.join(self.save_dir, "frame_{}.bin".format(self.current_frame + 1))
@@ -209,10 +229,9 @@ if __name__ == '__main__':
     odometry_topic = '/Odometry'  # Odometry topic
     save_dir = './BIN'
     time_tolerance = 0.1  # Maximum allowed time difference between synchronized messages
-    interval = 1.0  # Save data every 1 second
 
     rospy.init_node('data_collector', anonymous=True)
 
-    data_collector = DataCollector(image_topic, pointcloud_topic, odometry_topic, save_dir, interval, time_tolerance)
+    data_collector = DataCollector(image_topic, pointcloud_topic, odometry_topic, save_dir, time_tolerance)
 
     rospy.spin()
