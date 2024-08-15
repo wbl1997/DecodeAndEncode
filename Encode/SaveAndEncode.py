@@ -49,7 +49,10 @@ class DataCollector:
         if not self.odometry_queue:
             return None
 
-        closest_odometry = min(self.odometry_queue, key=lambda odom: abs(odom.header.stamp - timestamp))
+        # Make a copy of the deque to prevent mutation during iteration
+        odometry_copy = list(self.odometry_queue)
+
+        closest_odometry = min(odometry_copy, key=lambda odom: abs(odom.header.stamp - timestamp))
         return closest_odometry
 
     def find_closest_image(self, timestamp):
