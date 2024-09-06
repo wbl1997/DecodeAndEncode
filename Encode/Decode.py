@@ -19,11 +19,13 @@ def decode_bin_file(bin_file_path, decode_dir):
     frame_index = os.path.splitext(os.path.basename(bin_file_path))[0].split('_')[1]
     json_path = os.path.join(decode_dir, 'JSON', f'frame_{frame_index}.json')
     jpg_path = os.path.join(decode_dir, 'JPG', f'frame_{frame_index}.jpg')
+    thermal_jpg_path = os.path.join(decode_dir, 'THERMAL_JPG', f'frame_{frame_index}_thermal.jpg')
     pcd_3d_path = os.path.join(decode_dir, '3D', f'frame_{frame_index}.pcd')
     pcd_2d_path = os.path.join(decode_dir, '2D', f'frame_{frame_index}.pcd')
 
     os.makedirs(os.path.join(decode_dir, 'JSON'), exist_ok=True)
     os.makedirs(os.path.join(decode_dir, 'JPG'), exist_ok=True)
+    os.makedirs(os.path.join(decode_dir, 'THERMAL_JPG'), exist_ok=True)
     os.makedirs(os.path.join(decode_dir, '3D'), exist_ok=True)
     os.makedirs(os.path.join(decode_dir, '2D'), exist_ok=True)
 
@@ -46,8 +48,8 @@ HEIGHT 1
 VIEWPOINT 0 0 0 1 0 0 0 
 POINTS {points}
 DATA ascii
-'''.format(width=json_data['3dpcd_num'], points=json_data['3dpcd_num'])
-        binary_bin_to_ascii_pcd(bin_file, pcd_3d_path, pcd_3d_header, json_data['3dpcd_num'])
+'''.format(width=json_data['pcd_num_3d'], points=json_data['pcd_num_3d'])
+        binary_bin_to_ascii_pcd(bin_file, pcd_3d_path, pcd_3d_header, json_data['pcd_num_3d'])
 
         # Decode 2D point cloud data
         pcd_2d_header = '''# .PCD v0.7 - Point Cloud Data file format
@@ -61,8 +63,8 @@ HEIGHT 1
 VIEWPOINT 0 0 0 1 0 0 0 
 POINTS {points}
 DATA ascii
-'''.format(width=json_data['2dpcd_num'], points=json_data['2dpcd_num'])
-        binary_bin_to_ascii_pcd(bin_file, pcd_2d_path, pcd_2d_header, json_data['2dpcd_num'])
+'''.format(width=json_data['pcd_num_2d'], points=json_data['pcd_num_2d'])
+        binary_bin_to_ascii_pcd(bin_file, pcd_2d_path, pcd_2d_header, json_data['pcd_num_2d'])
 
         # Decode JPEG image data
         jpg_length = struct.unpack('I', bin_file.read(4))[0]
@@ -70,11 +72,16 @@ DATA ascii
         with open(jpg_path, 'wb') as jpg_file:
             jpg_file.write(jpg_data)
 
+        # Decode thermal JPEG image data
+        thermal_jpg_length = struct.unpack('I', bin_file.read(4))[0]
+        thermal_jpg_data = bin_file.read(thermal_jpg_length)
+        with open(thermal_jpg_path, 'wb') as thermal_jpg_file:
+            thermal_jpg_file.write(thermal_jpg_data)
+
 
 def main():
-    bin_dir = '/home/levy/PycharmProjects/Decode_Encode/BIN'
-    decode_dir = '/home/levy/PycharmProjects/Decode_Encode/PCD/decode'
-
+    bin_dir = './BIN'
+    decode_dir = './decode_data'
 
     bin_files = [f for f in os.listdir(bin_dir) if f.endswith('.bin')]
     bin_files.sort()
